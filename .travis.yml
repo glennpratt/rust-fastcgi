@@ -1,6 +1,9 @@
 language: rust
 rust:
-- stable
+  - stable
 cache:
- - cargo
- 
+  - cargo
+addons:
+  apt:
+    packages:
+      - libfcgi0ldbl
