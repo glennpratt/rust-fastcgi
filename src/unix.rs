@@ -23,17 +23,18 @@
 //                                                                            //
 ////////////////////////////////////////////////////////////////////////////////
 
-use libc as c;
+use nix::errno::Errno;
+use nix::sys::socket;
+use nix::sys::socket::SockAddr::*;
+use nix::unistd;
+use nix::Error::Sys;
 use std::io::{self, Read, Write};
-use std::mem;
-use std::net::{Ipv4Addr, Ipv6Addr};
 use std::os::unix::io::RawFd;
-use std::ptr::{null_mut};
 
-const LISTENSOCK_FILENO: c::c_int = 0;
+const LISTENSOCK_FILENO: RawFd = 0;
 
 pub struct Transport {
-    inner: c::c_int,
+    inner: RawFd,
 }
 
 impl Transport {
@@ -46,107 +47,66 @@ impl Transport {
     }
 
     pub fn is_fastcgi(&self) -> bool {
-        let res = unsafe { c::getpeername(self.inner, null_mut(), null_mut()) };
-        res == -1 && io::Error::last_os_error().raw_os_error() == Some(c::ENOTCONN)
+        match socket::getpeername(self.inner) {
+            Err(Sys(Errno::ENOTCONN)) => true,
+            _ => false,
+        }
     }
 
     pub fn accept(&mut self) -> io::Result<Socket> {
-        let res = unsafe {
-            c::accept(self.inner, 0 as *mut _, 0 as *mut _)
-        };
-        if res == -1 {
-            Err(io::Error::last_os_error())
-        } else {
-            Ok(Socket { inner: res })
+        match socket::accept(self.inner) {
+            Ok(fd) => Ok(Socket { inner: fd }),
+            Err(_) => Err(io::Error::last_os_error()),
         }
     }
 }
 
 pub struct Socket {
-    inner: c::c_int,
+    inner: RawFd,
 }
 
 impl Socket {
     pub fn peer(&self) -> io::Result<String> {
-        unsafe {
-            let mut ss = mem::zeroed::<c::sockaddr_storage>();
-            let mut len = mem::size_of::<c::sockaddr_storage>() as c::socklen_t;
-            let res = c::getpeername(
-                self.inner,
-                &mut ss as *mut _ as *mut c::sockaddr,
-                &mut len
-            );
-            if res == -1 {
-                return Err(io::Error::last_os_error());
-            }
-            match ss.ss_family as c::c_int {
-                c::AF_INET => {
-                    let sin = *(&ss as *const _ as *const c::sockaddr_in);
-                    let ip = mem::transmute::<c::in_addr, [u8; 4]>(sin.sin_addr);
-                    Ok(Ipv4Addr::new(ip[0], ip[1], ip[2], ip[3]).to_string())
-                },
-                c::AF_INET6 => {
-                    let sin = *(&ss as *const _ as *const c::sockaddr_in6);
-                    let ip = mem::transmute::<c::in6_addr, [u16; 8]>(sin.sin6_addr);
-                    Ok(Ipv6Addr::new(
-                            ip[0], ip[1], ip[2], ip[3],
-                            ip[4], ip[5], ip[6], ip[7]
-                        ).to_string()
-                    )
-                },
-                c::AF_UNIX => Ok(String::new()),
-                _ => Err(io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    "Unsupported FastCGI socket"
-                )),
-            }
+        match socket::getpeername(self.inner) {
+            Ok(Inet(addr)) => Ok(addr.to_str()),
+            Ok(Unix(_)) => Ok("".into()),
+            _ => Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "Unsupported FastCGI socket",
+            )),
         }
     }
 }
 
 impl Drop for Socket {
     fn drop(&mut self) {
-        unsafe { c::shutdown(self.inner, c::SHUT_WR); }
+        let _ = socket::shutdown(self.inner, socket::Shutdown::Write);
         let mut buf = Vec::new();
         self.read_to_end(&mut buf).ok();
-        unsafe { c::close(self.inner); }
+        let _ = unistd::close(self.inner);
     }
 }
 
 impl<'a> Read for &'a Socket {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        let res = unsafe {
-            c::read(
-                self.inner,
-                buf.as_mut_ptr() as *mut c::c_void,
-                buf.len() as c::size_t
-            )
-        };
-        if res == -1 {
-            Err(io::Error::last_os_error())
-        } else {
-            Ok(res as usize)
+        match unistd::read(self.inner, buf) {
+            Ok(size) => Ok(size),
+            Err(_) => Err(io::Error::last_os_error()),
         }
     }
 }
 
 impl<'a> Write for &'a Socket {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        let res = unsafe {
-            c::write(
-                self.inner,
-                buf.as_ptr() as *const c::c_void,
-                buf.len() as c::size_t
-            )
-        };
-        if res == -1 {
-            Err(io::Error::last_os_error())
-        } else {
-            Ok(res as usize)
+        match unistd::write(self.inner, buf) {
+            Ok(size) => Ok(size),
+            Err(_) => Err(io::Error::last_os_error()),
         }
     }
 
-    fn flush(&mut self) -> io::Result<()> { Ok(()) }
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
 }
 
 impl Read for Socket {
