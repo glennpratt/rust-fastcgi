@@ -39,7 +39,7 @@
 //!         });
 //!     }
 
-extern crate libc;
+extern crate nix;
 
 use std::collections::{HashMap, HashSet};
 use std::io::{self, Read, Write, Cursor, BufRead};
